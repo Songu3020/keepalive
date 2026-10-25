@@ -1,0 +1,7 @@
+{
+  "name": "@keepalive/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": { "keepalive": "dist/index.js" }
+}

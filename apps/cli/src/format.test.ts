@@ -1,6 +1,6 @@
-import type { EntryBand, EntryTtl } from '@keepalive/core';
+import type { EntryBand, EntryTtl, ExtendPlan } from '@keepalive/core';
 import { describe, expect, it } from 'vitest';
-import { countByBand, formatRemaining, formatReport } from './format.js';
+import { countByBand, formatPlan, formatRemaining, formatReport } from './format.js';
 
 function entry(partial: Partial<EntryTtl> & { band: EntryBand }): EntryTtl {
   return {
@@ -67,5 +67,37 @@ describe('formatReport', () => {
 
   it('handles a contract with no entries', () => {
     expect(formatReport('CTEST', [], 10)).toBe('Contract CTEST: 0 entries');
+  });
+});
+
+
+describe('formatPlan', () => {
+  const some = entry({ band: 'critical' });
+
+  it('summarises transactions and skipped entries', () => {
+    const plan: ExtendPlan = {
+      extendTo: 1_555_200,
+      clamped: false,
+      batches: [{ extendTo: 1_555_200, entries: [some, some, some] }],
+      skipped: [
+        { entry: some, reason: 'healthy' },
+        { entry: some, reason: 'healthy' },
+        { entry: some, reason: 'needs_restore' },
+      ],
+    };
+    const text = formatPlan('CTEST', plan, 6_000_000);
+    expect(text).toContain('dry run');
+    expect(text).toContain('90.0 days');
+    expect(text).toContain('3 entries to extend, in 1 transaction(s)');
+    expect(text).toMatch(/healthy\s+2/);
+    expect(text).toContain('need a restore');
+    expect(text).not.toContain('Lowered');
+  });
+
+  it('says when the target was lowered to the network maximum', () => {
+    const plan: ExtendPlan = { extendTo: 5_999_999, clamped: true, batches: [], skipped: [] };
+    const text = formatPlan('CTEST', plan, 6_000_000);
+    expect(text).toContain('Lowered to fit the network maximum');
+    expect(text).toContain('Nothing to extend.');
   });
 });

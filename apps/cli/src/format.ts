@@ -1,4 +1,4 @@
-import type { EntryBand, EntryTtl } from '@keepalive/core';
+import type { EntryBand, EntryTtl, ExtendPlan } from '@keepalive/core';
 
 /** About 5 seconds per ledger. The network can change this, so it is only for display. */
 export const LEDGERS_PER_DAY = 17_280;
@@ -70,6 +70,42 @@ export function formatReport(contractId: string, entries: readonly EntryTtl[], s
   }
   if (entries.length > rows.length) {
     lines.push(`  ... and ${entries.length - rows.length} more (use --show to see more)`);
+  }
+  return lines.join('\n');
+}
+
+
+function days(ledgers: number): string {
+  return `${(ledgers / LEDGERS_PER_DAY).toFixed(1)} days`;
+}
+
+/** Text for `keepalive plan`: what would be extended, and what is left alone. */
+export function formatPlan(contractId: string, plan: ExtendPlan, maxEntryTtl: number): string {
+  const lines: string[] = [];
+  lines.push(`Plan for ${contractId} (dry run: nothing is sent or signed)`);
+  lines.push(`Extend to ${plan.extendTo} ledgers (${days(plan.extendTo)}).`);
+  if (plan.clamped) {
+    lines.push(`  Lowered to fit the network maximum of ${maxEntryTtl} ledgers (${days(maxEntryTtl)}).`);
+  }
+
+  const total = plan.batches.reduce((sum, batch) => sum + batch.entries.length, 0);
+  if (total === 0) {
+    lines.push('Nothing to extend.');
+  } else {
+    lines.push(`${total} entries to extend, in ${plan.batches.length} transaction(s):`);
+    plan.batches.forEach((batch, index) => {
+      lines.push(`  transaction ${index + 1}: ${batch.entries.length} entries`);
+    });
+  }
+
+  const reasons = new Map<string, number>();
+  for (const item of plan.skipped) reasons.set(item.reason, (reasons.get(item.reason) ?? 0) + 1);
+  if (reasons.size > 0) {
+    lines.push('Left alone:');
+    for (const [reason, count] of reasons) lines.push(`  ${reason.padEnd(20)} ${count}`);
+  }
+  if ((reasons.get('needs_restore') ?? 0) > 0) {
+    lines.push('Archived entries need a restore before they can be extended.');
   }
   return lines.join('\n');
 }

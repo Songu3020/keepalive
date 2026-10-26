@@ -3,5 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "bin": { "keepalive": "dist/index.js" }
+  "bin": {
+    "keepalive": "dist/index.js"
+  },
+  "dependencies": {
+    "@google-cloud/bigquery": "^9.5.0",
+    "@keepalive/core": "^0.0.0",
+    "@stellar/stellar-sdk": "^17.4.0"
+  }
 }

@@ -10,3 +10,17 @@
 | E6 | Can a LedgerKey be rebuilt from Hubble columns alone, and what does a typical query cost? | Decides whether Hubble discovery works. |
 
 Record each result in this file with the date and the exact commands used.
+
+## Results
+
+Run on 2026-10-26 against Stellar testnet with @stellar/stellar-sdk 17.4.0.
+Commands: `node experiments/01-read-ttl.mts`, `node experiments/02-extend.mts`.
+
+| # | Result |
+|---|--------|
+| E1 | Yes. 4 entries extended in one transaction (tx 3b749aa131f0660dcc9b402beccf37ecf6b0df1bf838cb398dbc36099b20dcfa). Fee charged 126,601 stroops, against 32,512 for 1 entry. Cost is almost entirely per entry, so batching saves about 3% in fees. |
+| E2 | Yes. An account that did not create the contract extended its instance entry from about 7 to about 11.6 days (tx 2977c4bd8637634e81068b98fb4dd4653099c5d251cbc188a7ffb7e216c35e48). Tested only on token contract instance entries. |
+| E3 | Partly. The network settings allow 200 disk read entries and 200 write entries per transaction. Only 4 entries were tested, so the real maximum is unknown. |
+| E4 | Done. maxEntryTtl 3,110,400 ledgers (180 days), minPersistentTtl 120,960 (7 days), minTemporaryTtl 720 (1 hour). These differ from numbers in some Stellar docs pages, so Keepalive must read them from the network. |
+| E5 | Partly. A missing entry is left out of the getLedgerEntries answer. Not yet tested: what an archived entry looks like. |
+| E6 | Not run. |

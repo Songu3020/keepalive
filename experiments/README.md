@@ -39,3 +39,14 @@ Commands: `node experiments/01-read-ttl.mts`, `node experiments/02-extend.mts`.
 - Limits: mainnet only, 5-10 min lag, one entry of one contract tested.
   Confirm with RPC before extending.
 - Sandbox allowance: 1 TiB/month. Always read "will process" before Run.
+
+### E5 on mainnet, first live run (2026-10-26)
+
+`keepalive check CAS3J7... --limit 20` on the mainnet XLM contract:
+12 healthy, 1 expiring_soon, 4 archived, 3 not_found.
+
+- The mainnet RPC returned 4 archived persistent entries with a past
+  liveUntilLedgerSeq (seen for 4 entries; may be entries awaiting eviction).
+- The 3 not_found entries are all temporary. Hubble's contract_data_current
+  still lists deleted temporary entries, so discovery must not assume every
+  Hubble row is a live entry.

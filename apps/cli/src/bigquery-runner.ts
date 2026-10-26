@@ -1,5 +1,6 @@
 import { BigQuery } from '@google-cloud/bigquery';
 import type { QueryRunner } from '@keepalive/core';
+import { explainBigQueryError } from './errors.js';
 
 /** Each query may bill at most this many bytes. BigQuery fails it for free beyond that. */
 export const DEFAULT_MAX_BYTES_BILLED = 2_000_000_000; // 2 GB
@@ -20,13 +21,17 @@ export function createBigQueryRunner(
       for (const [name, value] of Object.entries(params)) {
         types[name] = typeof value === 'number' ? 'INT64' : 'STRING';
       }
-      const [rows] = await client.query({
-        query: sql,
-        params,
-        types,
-        maximumBytesBilled: String(maxBytesBilled),
-      });
-      return rows as Array<Record<string, unknown>>;
+      try {
+        const [rows] = await client.query({
+          query: sql,
+          params,
+          types,
+          maximumBytesBilled: String(maxBytesBilled),
+        });
+        return rows as Array<Record<string, unknown>>;
+      } catch (error) {
+        throw explainBigQueryError(error, maxBytesBilled);
+      }
     },
   };
 }

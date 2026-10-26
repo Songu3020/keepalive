@@ -41,8 +41,14 @@ describe('classifyBand', () => {
     ).toBe('deleted');
   });
 
-  it('returns not_found when the RPC returned no entry', () => {
+    it('returns not_found when the RPC returned no persistent entry', () => {
     expect(classifyBand({ ...base, liveUntilLedger: null })).toBe('not_found');
+  });
+
+  it('returns deleted when the RPC returned no temporary entry', () => {
+    expect(
+      classifyBand({ ...base, kind: 'temporary', liveUntilLedger: null }),
+    ).toBe('deleted');
   });
 
   it('rejects thresholds where critical exceeds expiringSoon', () => {

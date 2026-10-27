@@ -7,7 +7,7 @@ Thanks for helping. Keepalive finds a Stellar contract's storage entries, shows 
 You need Node.js 22.12 or newer.
 
 ```bash
-git clone https://github.com/OWNER/keepalive.git
+git clone https://github.com/Songu3020/keepalive.git
 cd keepalive
 npm install
 npm run typecheck

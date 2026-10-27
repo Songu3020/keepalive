@@ -50,3 +50,11 @@ Commands: `node experiments/01-read-ttl.mts`, `node experiments/02-extend.mts`.
 - The 3 not_found entries are all temporary. Hubble's contract_data_current
   still lists deleted temporary entries, so discovery must not assume every
   Hubble row is a live entry.
+
+  ### Hubble cost is not guaranteed (2026-10-26)
+
+The same discovery query billed ~200 MB, then was refused by the 2 GB cap
+(BigQuery needed ~175 GB), then worked again about 10 minutes later. Likely
+cause: Hubble rebuilt contract_data_current and it was briefly not
+clustered by contract_id (unconfirmed). Design rule: every Hubble query
+keeps a bytes-billed cap, and discovery must handle a refusal gracefully.

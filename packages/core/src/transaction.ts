@@ -73,8 +73,7 @@ export class FeeTooHighError extends Error {
  * ceiling. The result is still unsigned.
  *
  * `feeStroops` is the most the transaction can be charged. The real charge was
- * about 20% lower in experiment E1.
- */
+ * typically 15 to 25 percent lower (experiments E1 and 03). */
 export async function prepareWithFeeCeiling(
   preparer: TransactionPreparer,
   transaction: Transaction,

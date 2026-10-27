@@ -2,6 +2,12 @@
   "name": "@keepalive/cli",
   "version": "0.0.0",
   "private": true,
+    "description": "Find Soroban contract storage entries, show how long each has left, and plan the transactions that extend them",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+
   "type": "module",
   "bin": {
     "keepalive": "dist/index.js"

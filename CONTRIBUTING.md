@@ -51,3 +51,12 @@ Rule of thumb: logic goes in `packages/core` as a function that takes its inputs
 - Security problems: do not open a public issue. See [SECURITY.md](SECURITY.md).
 
 Please be respectful and patient with other contributors.
+
+## Using AI tools
+
+AI assistants are allowed, but you are responsible for every line you submit.
+
+- Read and understand your whole diff before opening a pull request. If you cannot explain a change, do not submit it.
+- Run `npm run typecheck` and `npm test` yourself. Do not submit code you have not run.
+- Tests must not use the network. Anything that sends transactions is verified on testnet only.
+- Pull requests that look generated, untested or not understood will be closed without review.

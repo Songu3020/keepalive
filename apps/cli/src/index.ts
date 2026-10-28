@@ -11,8 +11,9 @@ import {
 import { StrKey, rpc } from '@stellar/stellar-sdk';
 import { DEFAULT_MAX_BYTES_BILLED, createBigQueryRunner } from './bigquery-runner.js';
 import { LEDGERS_PER_DAY, formatPlan, formatReport } from './format.js';
+import { getVersion } from './version.js';
 
-const VERSION = '0.0.0';
+const VERSION = getVersion();
 // A public third-party mainnet RPC from the Stellar docs. Use --rpc to choose another.
 const DEFAULT_RPC = 'https://mainnet.sorobanrpc.com';
 

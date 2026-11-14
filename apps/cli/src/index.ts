@@ -2,30 +2,38 @@
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import {
+  ExtendFailedError,
   ExplicitSource,
   HubbleSource,
   parseKeyList,
   planExtensions,
+  prepareExtension,
   readNetworkSettings,
   readTtls,
+  sendExtension,
   type DiscoverySource,
   type EntryRef,
   type EntryTtl,
 } from '@keepalive/core';
-import { StrKey, rpc } from '@stellar/stellar-sdk';
+import { StrKey, rpc, type Keypair, type Transaction } from '@stellar/stellar-sdk';
 import { DEFAULT_MAX_BYTES_BILLED, createBigQueryRunner } from './bigquery-runner.js';
+import { formatOutcomes, formatPrepared } from './extend-format.js';
 import { LEDGERS_PER_DAY, formatPlan, formatReport } from './format.js';
+import { networkFor, requireTestnetForSending, type NetworkConfig } from './networks.js';
+import { readKeypair, SECRET_ENV } from './secret.js';
 import { getVersion } from './version.js';
 
 const VERSION = getVersion();
-// A public third-party mainnet RPC from the Stellar docs. Use --rpc to choose another.
-const DEFAULT_RPC = 'https://mainnet.sorobanrpc.com';
+// check and plan use mainnet unless you pass --network. --rpc picks another RPC server.
+const DEFAULT_NETWORK = 'mainnet';
+const DEFAULT_MAX_FEE_STROOPS = 1_000_000;
 
 const HELP = `keepalive ${VERSION}
 
 Usage:
   keepalive check <contract-id> [options]   Show how long each storage entry has left
   keepalive plan <contract-id> [options]    Show what would be extended (sends nothing)
+  keepalive extend <contract-id> [options]  Extend entries. TESTNET ONLY, needs --keys-file. Dry run unless --yes.
 
 Entries are found through Hubble (mainnet only), or from a file of ledger keys
 you give with --keys-file. Their expiry is read from the Stellar RPC.
@@ -35,7 +43,11 @@ Options:
                        Or set GOOGLE_CLOUD_PROJECT. Not needed with --keys-file.
   --keys-file <path>   Use the ledger keys in this file instead of Hubble: one base64
                        XDR LedgerKey per line, '#' starts a comment. Works on testnet.
-  --rpc <url>          Stellar mainnet RPC (default ${DEFAULT_RPC})
+  --network <name>     testnet or mainnet (default ${DEFAULT_NETWORK}; extend needs it spelled out)
+  --rpc <url>          Stellar RPC server (default: a public one for the network)
+  --max-fee <stroops>  extend: refuse if all transactions together could cost more
+                       than this (default ${DEFAULT_MAX_FEE_STROOPS} stroops = 0.1 XLM)
+  --yes                extend: really send. Without it, extend only shows what it would do.
   --limit <n>          Most entries to fetch from Hubble (default 10000)
   --show <n>           check: how many of the soonest-expiring entries to print (default 20)
   --warn-days <n>      "expiring_soon" below this many days left (default 30)
@@ -44,12 +56,17 @@ Options:
   --max-gb <n>         Refuse any Hubble query that would bill more than this (default 2)
   -v, --version        Print the version
   -h, --help           Print this help
+
+extend reads the secret key of the paying account from ${SECRET_ENV} (never from an option).
 `;
 
 const OPTIONS = {
   project: { type: 'string' },
   'keys-file': { type: 'string' },
   rpc: { type: 'string' },
+  network: { type: 'string' },
+  'max-fee': { type: 'string' },
+  yes: { type: 'boolean' },
   limit: { type: 'string' },
   show: { type: 'string' },
   'warn-days': { type: 'string' },
@@ -68,6 +85,7 @@ function positiveNumber(name: string, text: string | undefined, fallback: number
 }
 
 interface Loaded {
+  network: NetworkConfig;
   contractId: string;
   server: rpc.Server;
   entries: EntryTtl[];
@@ -91,7 +109,8 @@ async function load(argv: string[]): Promise<Loaded> {
   const maxGb = positiveNumber('--max-gb', values['max-gb'], DEFAULT_MAX_BYTES_BILLED / 1e9);
   if (criticalDays > warnDays) throw new Error('--critical-days must not be larger than --warn-days');
 
-  const rpcUrl = values.rpc ?? DEFAULT_RPC;
+  const network = networkFor(values.network ?? DEFAULT_NETWORK);
+  const rpcUrl = values.rpc ?? network.rpcUrl;
   const keysFile = values['keys-file'];
   let source: DiscoverySource;
   if (keysFile !== undefined) {
@@ -119,7 +138,7 @@ async function load(argv: string[]): Promise<Loaded> {
   if (keysFile === undefined && refs.length >= limit) {
     console.error(`Note: stopped at the --limit of ${limit}; the contract may have more entries.`);
   }
-  return { contractId, server, entries, show: Math.round(show), extendDays };
+  return { network, contractId, server, entries, show: Math.round(show), extendDays };
 }
 
 async function check(argv: string[]): Promise<void> {
@@ -137,6 +156,85 @@ async function plan(argv: string[]): Promise<void> {
   console.log(formatPlan(contractId, result, settings.maxEntryTtl));
 }
 
+/** Signs with the key, sends, and waits until the network has finished the transaction. */
+function signAndSendWith(server: rpc.Server, signer: Keypair) {
+  return async (transaction: Transaction) => {
+    transaction.sign(signer);
+    const sent = await server.sendTransaction(transaction);
+    if (sent.status === 'ERROR') {
+      throw new Error(`the network refused it: ${JSON.stringify(sent.errorResult)}`);
+    }
+    const done = await server.pollTransaction(sent.hash);
+    if (done.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
+      throw new Error(`transaction ${sent.hash} ended with status ${done.status}`);
+    }
+    return { hash: sent.hash, feeChargedStroops: Number(String(done.resultXdr.feeCharged)) };
+  };
+}
+
+async function extend(argv: string[]): Promise<void> {
+  const { values } = parseArgs({ args: argv, allowPositionals: true, options: OPTIONS });
+  if (values.network === undefined) {
+    throw new Error('extend needs --network testnet (the network is never guessed).');
+  }
+  // Both checks come first, before any network call and before the key is read.
+  requireTestnetForSending(networkFor(values.network));
+  if (values['keys-file'] === undefined) {
+    throw new Error(
+      'extend needs --keys-file for now. Hubble only knows mainnet, so it cannot find testnet entries.',
+    );
+  }
+  const loaded = await load(argv);
+
+  const maxFee = positiveNumber('--max-fee', values['max-fee'], DEFAULT_MAX_FEE_STROOPS);
+  if (!Number.isInteger(maxFee)) throw new Error('--max-fee must be a whole number of stroops');
+
+  console.error('Reading the network limits...');
+  const settings = await readNetworkSettings(loaded.server);
+  const plan = planExtensions(loaded.entries, settings, {
+    extendToLedgers: Math.round(loaded.extendDays * LEDGERS_PER_DAY),
+  });
+  console.log(formatPlan(loaded.contractId, plan, settings.maxEntryTtl));
+  if (plan.batches.length === 0) {
+    console.log('\nNothing to extend.');
+    return;
+  }
+
+  const signer = readKeypair(process.env);
+  const reported = (await loaded.server.getNetwork()).passphrase;
+  if (reported !== loaded.network.passphrase) {
+    throw new Error('The RPC server is on a different network than --network. Nothing was sent.');
+  }
+  const source = await loaded.server.getAccount(signer.publicKey());
+
+  console.error('Simulating the transactions...');
+  const prepared = await prepareExtension({
+    plan,
+    source,
+    networkPassphrase: loaded.network.passphrase,
+    feeCeilingStroops: maxFee,
+    preparer: loaded.server,
+  });
+  console.log(`\nPaying account: ${signer.publicKey()}`);
+  console.log(formatPrepared(prepared, plan.extendTo, maxFee));
+
+  if (values.yes !== true) {
+    console.log('\nDry run: nothing was sent. Add --yes to send.');
+    return;
+  }
+
+  console.error('Sending...');
+  try {
+    const outcomes = await sendExtension(prepared, plan, signAndSendWith(loaded.server, signer));
+    console.log(`\nDone.\n${formatOutcomes(outcomes)}`);
+  } catch (error) {
+    if (error instanceof ExtendFailedError && error.completed.length > 0) {
+      console.error(`Already sent before the failure:\n${formatOutcomes(error.completed)}`);
+    }
+    throw error;
+  }
+}
+
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
   if (command === '-v' || command === '--version') {
@@ -145,6 +243,8 @@ async function main(): Promise<void> {
     await check(rest);
   } else if (command === 'plan') {
     await plan(rest);
+  } else if (command === 'extend') {
+    await extend(rest);
   } else {
     console.log(HELP);
   }

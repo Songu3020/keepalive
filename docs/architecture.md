@@ -29,6 +29,7 @@ Each module that needs the outside world takes a small interface (`QueryRunner`,
 |---|---|
 | `keepalive check <contract>` | Finds entries through Hubble, reads expiry from the RPC, prints a report |
 | `keepalive plan <contract>` | The same, then prints what would be extended. Sends nothing. |
+| `keepalive extend <contract>` | Plans, simulates, shows the maximum fee, and with `--yes` signs and sends. Testnet only, needs `--keys-file`. The key comes from `KEEPALIVE_SECRET`. |
 
 The CLI also holds the BigQuery wiring (with a per-query cost cap) and the text formatting.
 
@@ -76,11 +77,12 @@ The experiments are recorded in `experiments/README.md`.
 | 1 | Core reader and expiry bands | Done |
 | 2 | Planner and unsigned extend transactions | Done, verified end to end on testnet (experiment 03) |
 | 3 | Hubble discovery | Done, verified on mainnet reads |
-| 4 | `extend` command that signs and sends, mainnet-safe | Next |
+| 4 | `extend` command that signs and sends | Done on testnet (experiment 04). Mainnet sending is refused until it has its own safety review. |
 | 5 | Restore command for archived entries | Not started |
 | 6 | Long-running daemon with saved state and alerts | Not started |
 | 7 | CI check for missing TTL extension in contract source | Not started |
-| - | Discovery without Hubble (deterministic instance and code entries, Galexie) | Not started |
+| - | Discovery without Hubble: explicit key files | Done (`--keys-file`) |
+| - | Discovery without Hubble: deterministic instance and code entries, Galexie | Not started |
 
 ## Open questions
 
@@ -93,5 +95,5 @@ The experiments are recorded in `experiments/README.md`.
 
 ## Non-goals, for now
 
-- Keepalive does not hold keys. Signing happens outside the library.
+- Keepalive does not store keys. The library never sees a key: the CLI reads one from `KEEPALIVE_SECRET`, signs, and forgets it.
 - It is not a hosted service.

@@ -58,3 +58,18 @@ The same discovery query billed ~200 MB, then was refused by the 2 GB cap
 cause: Hubble rebuilt contract_data_current and it was briefly not
 clustered by contract_id (unconfirmed). Design rule: every Hubble query
 keeps a bytes-billed cap, and discovery must handle a refusal gracefully.
+
+## Experiment 04: `keepalive extend` on testnet (the real command)
+
+Question: does the finished `keepalive extend` command extend a real entry on testnet, with the fee ceiling and dry run working as designed?
+
+How: `experiments/04-extend-testnet-setup.mts` makes a throwaway funded account and one token contract, and writes the contract's instance key to a key file. Then `check`, `extend` (dry run), `extend --yes` and `check` again, all with `--network testnet --keys-file`.
+
+Result: PASS.
+- The dry run planned 1 transaction for 1 entry, extended to 1,555,200 ledgers (90 days), with a maximum fee of 687,473 stroops, under the 1,000,000 ceiling. Nothing was sent.
+- With `--yes` it sent the transaction and was charged 593,789 stroops, about 14 percent below the maximum, as in experiment 03.
+- The second `check` showed the entry as `healthy` with 90.0 days left.
+
+Safety checks verified by hand: `extend` without `--network` is refused, and `--network mainnet` is refused with a clear message, before any network call and before the key is read.
+
+Not verified: more than one transaction in a row through the command, large batches, and archived entries (those need restore, issue #8). Mainnet sending is deliberately not supported yet.

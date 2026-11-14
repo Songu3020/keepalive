@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { readFileSync } from 'node:fs';
 import {
+  ExplicitSource,
   HubbleSource,
+  parseKeyList,
   planExtensions,
   readNetworkSettings,
   readTtls,
+  type DiscoverySource,
   type EntryRef,
   type EntryTtl,
 } from '@keepalive/core';
@@ -23,12 +27,14 @@ Usage:
   keepalive check <contract-id> [options]   Show how long each storage entry has left
   keepalive plan <contract-id> [options]    Show what would be extended (sends nothing)
 
-Entries are found through Hubble and their expiry is read from the Stellar RPC.
-Mainnet only.
+Entries are found through Hubble (mainnet only), or from a file of ledger keys
+you give with --keys-file. Their expiry is read from the Stellar RPC.
 
 Options:
   --project <id>       Google Cloud project that runs the Hubble query.
-                       Or set GOOGLE_CLOUD_PROJECT.
+                       Or set GOOGLE_CLOUD_PROJECT. Not needed with --keys-file.
+  --keys-file <path>   Use the ledger keys in this file instead of Hubble: one base64
+                       XDR LedgerKey per line, '#' starts a comment. Works on testnet.
   --rpc <url>          Stellar mainnet RPC (default ${DEFAULT_RPC})
   --limit <n>          Most entries to fetch from Hubble (default 10000)
   --show <n>           check: how many of the soonest-expiring entries to print (default 20)
@@ -42,6 +48,7 @@ Options:
 
 const OPTIONS = {
   project: { type: 'string' },
+  'keys-file': { type: 'string' },
   rpc: { type: 'string' },
   limit: { type: 'string' },
   show: { type: 'string' },
@@ -68,7 +75,7 @@ interface Loaded {
   extendDays: number;
 }
 
-/** Shared by `check` and `plan`: find the entries, then read their expiry. */
+/** Shared by `check` and `plan`: find the entries (Hubble or a key file), then read their expiry. */
 async function load(argv: string[]): Promise<Loaded> {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: OPTIONS });
 
@@ -76,11 +83,6 @@ async function load(argv: string[]): Promise<Loaded> {
   if (contractId === undefined || !StrKey.isValidContract(contractId)) {
     throw new Error('Give a contract id that starts with C, for example: keepalive check CAS3J7...');
   }
-  const project = values.project ?? process.env['GOOGLE_CLOUD_PROJECT'];
-  if (project === undefined) {
-    throw new Error('No Google Cloud project. Pass --project <id> or set GOOGLE_CLOUD_PROJECT.');
-  }
-
   const limit = positiveNumber('--limit', values.limit, 10_000);
   const show = positiveNumber('--show', values.show, 20);
   const warnDays = positiveNumber('--warn-days', values['warn-days'], 30);
@@ -90,8 +92,21 @@ async function load(argv: string[]): Promise<Loaded> {
   if (criticalDays > warnDays) throw new Error('--critical-days must not be larger than --warn-days');
 
   const rpcUrl = values.rpc ?? DEFAULT_RPC;
-  console.error(`Finding entries through Hubble (project ${project})...`);
-  const source = new HubbleSource(createBigQueryRunner(project, Math.round(maxGb * 1e9)), limit);
+  const keysFile = values['keys-file'];
+  let source: DiscoverySource;
+  if (keysFile !== undefined) {
+    console.error(`Reading ledger keys from ${keysFile}...`);
+    source = new ExplicitSource(parseKeyList(readFileSync(keysFile, 'utf8')));
+  } else {
+    const project = values.project ?? process.env['GOOGLE_CLOUD_PROJECT'];
+    if (project === undefined) {
+      throw new Error(
+        'No Google Cloud project. Pass --project <id> or set GOOGLE_CLOUD_PROJECT, or use --keys-file.',
+      );
+    }
+    console.error(`Finding entries through Hubble (project ${project})...`);
+    source = new HubbleSource(createBigQueryRunner(project, Math.round(maxGb * 1e9)), limit);
+  }
   const refs: EntryRef[] = [];
   for await (const ref of source.discover(contractId)) refs.push(ref);
 
@@ -101,7 +116,7 @@ async function load(argv: string[]): Promise<Loaded> {
     expiringSoon: Math.round(warnDays * LEDGERS_PER_DAY),
     critical: Math.round(criticalDays * LEDGERS_PER_DAY),
   });
-  if (refs.length >= limit) {
+  if (keysFile === undefined && refs.length >= limit) {
     console.error(`Note: stopped at the --limit of ${limit}; the contract may have more entries.`);
   }
   return { contractId, server, entries, show: Math.round(show), extendDays };

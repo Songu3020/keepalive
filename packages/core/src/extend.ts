@@ -57,13 +57,16 @@ export class ExtendFailedError extends Error {
 }
 
 /**
- * Builds and simulates every transaction in the plan. Refuses, before anything
- * can be sent, when the total maximum fee is above the ceiling.
+ * Simulates already-built unsigned transactions through the RPC, one by one.
+ * Refuses, before anything can be sent, when one transaction or the total
+ * maximum fee is above the ceiling. Shared by extend and restore.
  */
-export async function prepareExtension(options: ExtendOptions): Promise<PreparedExtension> {
-  const { plan, source, networkPassphrase, feeCeilingStroops, preparer } = options;
-  const unsigned = buildExtendTransactions(source, plan, networkPassphrase);
-
+export async function prepareTransactions(
+  unsigned: readonly Transaction[],
+  entryCount: number,
+  feeCeilingStroops: number,
+  preparer: TransactionPreparer,
+): Promise<PreparedExtension> {
   const transactions: Transaction[] = [];
   const maxFeesStroops: number[] = [];
   for (const tx of unsigned) {
@@ -76,8 +79,18 @@ export async function prepareExtension(options: ExtendOptions): Promise<Prepared
   if (totalMaxFeeStroops > feeCeilingStroops) {
     throw new FeeTooHighError(totalMaxFeeStroops, feeCeilingStroops);
   }
-  const entryCount = plan.batches.reduce((sum, batch) => sum + batch.entries.length, 0);
   return { transactions, maxFeesStroops, totalMaxFeeStroops, entryCount };
+}
+
+/**
+ * Builds and simulates every transaction in the plan. Refuses, before anything
+ * can be sent, when the total maximum fee is above the ceiling.
+ */
+export async function prepareExtension(options: ExtendOptions): Promise<PreparedExtension> {
+  const { plan, source, networkPassphrase, feeCeilingStroops, preparer } = options;
+  const unsigned = buildExtendTransactions(source, plan, networkPassphrase);
+  const entryCount = plan.batches.reduce((sum, batch) => sum + batch.entries.length, 0);
+  return prepareTransactions(unsigned, entryCount, feeCeilingStroops, preparer);
 }
 
 /**
@@ -86,7 +99,7 @@ export async function prepareExtension(options: ExtendOptions): Promise<Prepared
  */
 export async function sendExtension(
   prepared: PreparedExtension,
-  plan: ExtendPlan,
+  plan: { batches: ReadonlyArray<{ entries: readonly unknown[] }> },
   signAndSend: SignAndSend,
 ): Promise<BatchOutcome[]> {
   const completed: BatchOutcome[] = [];

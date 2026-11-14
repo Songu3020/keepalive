@@ -7,17 +7,25 @@ import {
   HubbleSource,
   parseKeyList,
   planExtensions,
+  planRestores,
   prepareExtension,
+  prepareRestore,
   readNetworkSettings,
   readTtls,
   sendExtension,
   type DiscoverySource,
   type EntryRef,
   type EntryTtl,
+  type PreparedExtension,
 } from '@keepalive/core';
-import { StrKey, rpc, type Keypair, type Transaction } from '@stellar/stellar-sdk';
+import { StrKey, rpc, type Account, type Keypair, type Transaction } from '@stellar/stellar-sdk';
 import { DEFAULT_MAX_BYTES_BILLED, createBigQueryRunner } from './bigquery-runner.js';
-import { formatOutcomes, formatPrepared } from './extend-format.js';
+import {
+  formatOutcomes,
+  formatPrepared,
+  formatRestorePlan,
+  formatRestorePrepared,
+} from './extend-format.js';
 import { LEDGERS_PER_DAY, formatPlan, formatReport } from './format.js';
 import { networkFor, requireTestnetForSending, type NetworkConfig } from './networks.js';
 import { readKeypair, SECRET_ENV } from './secret.js';
@@ -34,6 +42,7 @@ Usage:
   keepalive check <contract-id> [options]   Show how long each storage entry has left
   keepalive plan <contract-id> [options]    Show what would be extended (sends nothing)
   keepalive extend <contract-id> [options]  Extend entries. TESTNET ONLY, needs --keys-file. Dry run unless --yes.
+  keepalive restore <contract-id> [options] Restore archived entries. Same rules as extend.
 
 Entries are found through Hubble (mainnet only), or from a file of ledger keys
 you give with --keys-file. Their expiry is read from the Stellar RPC.
@@ -45,9 +54,9 @@ Options:
                        XDR LedgerKey per line, '#' starts a comment. Works on testnet.
   --network <name>     testnet or mainnet (default ${DEFAULT_NETWORK}; extend needs it spelled out)
   --rpc <url>          Stellar RPC server (default: a public one for the network)
-  --max-fee <stroops>  extend: refuse if all transactions together could cost more
+  --max-fee <stroops>  extend, restore: refuse if all transactions together could cost more
                        than this (default ${DEFAULT_MAX_FEE_STROOPS} stroops = 0.1 XLM)
-  --yes                extend: really send. Without it, extend only shows what it would do.
+  --yes                extend, restore: really send. Without it, they only show what they would do.
   --limit <n>          Most entries to fetch from Hubble (default 10000)
   --show <n>           check: how many of the soonest-expiring entries to print (default 20)
   --warn-days <n>      "expiring_soon" below this many days left (default 30)
@@ -57,7 +66,7 @@ Options:
   -v, --version        Print the version
   -h, --help           Print this help
 
-extend reads the secret key of the paying account from ${SECRET_ENV} (never from an option).
+extend and restore read the secret key of the paying account from ${SECRET_ENV} (never from an option).
 `;
 
 const OPTIONS = {
@@ -172,16 +181,30 @@ function signAndSendWith(server: rpc.Server, signer: Keypair) {
   };
 }
 
-async function extend(argv: string[]): Promise<void> {
+/** What differs between `extend` and `restore`. Everything else is shared, so the safety checks exist once. */
+interface Work {
+  batches: ReadonlyArray<{ entries: readonly unknown[] }>;
+  /** printed before anything else */
+  summary: string;
+  /** printed when there is nothing to do */
+  nothing: string;
+  prepare(source: Account): Promise<PreparedExtension>;
+  /** printed after simulation: what will be sent and what it can cost */
+  describe(prepared: PreparedExtension): string;
+  /** printed after a successful send */
+  next?: string;
+}
+
+async function sendCommand(argv: string[], command: 'extend' | 'restore'): Promise<void> {
   const { values } = parseArgs({ args: argv, allowPositionals: true, options: OPTIONS });
   if (values.network === undefined) {
-    throw new Error('extend needs --network testnet (the network is never guessed).');
+    throw new Error(`${command} needs --network testnet (the network is never guessed).`);
   }
   // Both checks come first, before any network call and before the key is read.
   requireTestnetForSending(networkFor(values.network));
   if (values['keys-file'] === undefined) {
     throw new Error(
-      'extend needs --keys-file for now. Hubble only knows mainnet, so it cannot find testnet entries.',
+      `${command} needs --keys-file for now. Hubble only knows mainnet, so it cannot find testnet entries.`,
     );
   }
   const loaded = await load(argv);
@@ -191,12 +214,35 @@ async function extend(argv: string[]): Promise<void> {
 
   console.error('Reading the network limits...');
   const settings = await readNetworkSettings(loaded.server);
-  const plan = planExtensions(loaded.entries, settings, {
-    extendToLedgers: Math.round(loaded.extendDays * LEDGERS_PER_DAY),
-  });
-  console.log(formatPlan(loaded.contractId, plan, settings.maxEntryTtl));
-  if (plan.batches.length === 0) {
-    console.log('\nNothing to extend.');
+  const common = { networkPassphrase: loaded.network.passphrase, feeCeilingStroops: maxFee, preparer: loaded.server };
+
+  let work: Work;
+  if (command === 'extend') {
+    const plan = planExtensions(loaded.entries, settings, {
+      extendToLedgers: Math.round(loaded.extendDays * LEDGERS_PER_DAY),
+    });
+    work = {
+      batches: plan.batches,
+      summary: formatPlan(loaded.contractId, plan, settings.maxEntryTtl),
+      nothing: 'Nothing to extend.',
+      prepare: (source) => prepareExtension({ ...common, plan, source }),
+      describe: (prepared) => formatPrepared(prepared, plan.extendTo, maxFee),
+    };
+  } else {
+    const plan = planRestores(loaded.entries, settings);
+    work = {
+      batches: plan.batches,
+      summary: formatRestorePlan(loaded.contractId, plan),
+      nothing: 'Nothing to restore.',
+      prepare: (source) => prepareRestore({ ...common, plan, source }),
+      describe: (prepared) => formatRestorePrepared(prepared, maxFee),
+      next: 'Restored entries get only a short life. Run `keepalive extend` next to give them a long one.',
+    };
+  }
+
+  console.log(work.summary);
+  if (work.batches.length === 0) {
+    console.log(`\n${work.nothing}`);
     return;
   }
 
@@ -208,15 +254,9 @@ async function extend(argv: string[]): Promise<void> {
   const source = await loaded.server.getAccount(signer.publicKey());
 
   console.error('Simulating the transactions...');
-  const prepared = await prepareExtension({
-    plan,
-    source,
-    networkPassphrase: loaded.network.passphrase,
-    feeCeilingStroops: maxFee,
-    preparer: loaded.server,
-  });
+  const prepared = await work.prepare(source);
   console.log(`\nPaying account: ${signer.publicKey()}`);
-  console.log(formatPrepared(prepared, plan.extendTo, maxFee));
+  console.log(work.describe(prepared));
 
   if (values.yes !== true) {
     console.log('\nDry run: nothing was sent. Add --yes to send.');
@@ -225,8 +265,9 @@ async function extend(argv: string[]): Promise<void> {
 
   console.error('Sending...');
   try {
-    const outcomes = await sendExtension(prepared, plan, signAndSendWith(loaded.server, signer));
+    const outcomes = await sendExtension(prepared, work, signAndSendWith(loaded.server, signer));
     console.log(`\nDone.\n${formatOutcomes(outcomes)}`);
+    if (work.next !== undefined) console.log(`\n${work.next}`);
   } catch (error) {
     if (error instanceof ExtendFailedError && error.completed.length > 0) {
       console.error(`Already sent before the failure:\n${formatOutcomes(error.completed)}`);
@@ -243,8 +284,8 @@ async function main(): Promise<void> {
     await check(rest);
   } else if (command === 'plan') {
     await plan(rest);
-  } else if (command === 'extend') {
-    await extend(rest);
+  } else if (command === 'extend' || command === 'restore') {
+    await sendCommand(rest, command);
   } else {
     console.log(HELP);
   }

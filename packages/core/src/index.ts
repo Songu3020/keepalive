@@ -8,3 +8,4 @@ export * from './planner.js';
 export * from './network.js';
 export * from './transaction.js';
 export * from './extend.js';
+export * from './restore.js';

@@ -36,3 +36,30 @@ export function requireTestnetForSending(network: NetworkConfig): void {
     );
   }
 }
+
+export interface RpcNetworkSource {
+  getNetwork(): Promise<{ passphrase: string }>;
+}
+
+export function networkNameForPassphrase(passphrase: string): string {
+  if (passphrase === Networks.TESTNET) return 'testnet';
+  if (passphrase === Networks.PUBLIC) return 'mainnet';
+  return JSON.stringify(passphrase);
+}
+
+/**
+ * Asks the RPC server which Stellar network it is on and refuses to proceed
+ * when that differs from `--network`.
+ */
+export async function verifyRpcNetwork(
+  server: RpcNetworkSource,
+  expected: NetworkConfig,
+): Promise<void> {
+  const { passphrase } = await server.getNetwork();
+  if (passphrase !== expected.passphrase) {
+    const actual = networkNameForPassphrase(passphrase);
+    throw new Error(
+      `--network is ${expected.name}, but the RPC server is on ${actual}.`,
+    );
+  }
+}

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 import {
   ExtendFailedError,
   ExplicitSource,
@@ -27,7 +29,12 @@ import {
   formatRestorePrepared,
 } from './extend-format.js';
 import { LEDGERS_PER_DAY, formatPlan, formatReport } from './format.js';
-import { networkFor, requireTestnetForSending, type NetworkConfig } from './networks.js';
+import {
+  networkFor,
+  requireTestnetForSending,
+  verifyRpcNetwork,
+  type NetworkConfig,
+} from './networks.js';
 import { readKeypair, SECRET_ENV } from './secret.js';
 import { getVersion } from './version.js';
 
@@ -102,8 +109,19 @@ interface Loaded {
   extendDays: number;
 }
 
+export interface LoadDependencies {
+  createServer?: (rpcUrl: string) => rpc.Server;
+  createSource?: (options: {
+    keysFile: string | undefined;
+    project: string | undefined;
+    maxBytesBilled: number;
+    limit: number;
+  }) => DiscoverySource;
+  readEntryTtls?: typeof readTtls;
+}
+
 /** Shared by `check` and `plan`: find the entries (Hubble or a key file), then read their expiry. */
-async function load(argv: string[]): Promise<Loaded> {
+export async function load(argv: string[], deps: LoadDependencies = {}): Promise<Loaded> {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: OPTIONS });
 
   const contractId = positionals[0];
@@ -121,26 +139,36 @@ async function load(argv: string[]): Promise<Loaded> {
   const network = networkFor(values.network ?? DEFAULT_NETWORK);
   const rpcUrl = values.rpc ?? network.rpcUrl;
   const keysFile = values['keys-file'];
+  const project = values.project ?? process.env['GOOGLE_CLOUD_PROJECT'];
+  if (keysFile === undefined && project === undefined) {
+    throw new Error(
+      'No Google Cloud project. Pass --project <id> or set GOOGLE_CLOUD_PROJECT, or use --keys-file.',
+    );
+  }
+
+  const server = (deps.createServer ?? ((url: string) => new rpc.Server(url, { allowHttp: url.startsWith('http://') })))(rpcUrl);
+  await verifyRpcNetwork(server, network);
+
   let source: DiscoverySource;
-  if (keysFile !== undefined) {
+  if (deps.createSource !== undefined) {
+    source = deps.createSource({
+      keysFile,
+      project,
+      maxBytesBilled: Math.round(maxGb * 1e9),
+      limit,
+    });
+  } else if (keysFile !== undefined) {
     console.error(`Reading ledger keys from ${keysFile}...`);
     source = new ExplicitSource(parseKeyList(readFileSync(keysFile, 'utf8')));
   } else {
-    const project = values.project ?? process.env['GOOGLE_CLOUD_PROJECT'];
-    if (project === undefined) {
-      throw new Error(
-        'No Google Cloud project. Pass --project <id> or set GOOGLE_CLOUD_PROJECT, or use --keys-file.',
-      );
-    }
     console.error(`Finding entries through Hubble (project ${project})...`);
-    source = new HubbleSource(createBigQueryRunner(project, Math.round(maxGb * 1e9)), limit);
+    source = new HubbleSource(createBigQueryRunner(project!, Math.round(maxGb * 1e9)), limit);
   }
   const refs: EntryRef[] = [];
   for await (const ref of source.discover(contractId)) refs.push(ref);
 
   console.error(`Found ${refs.length}. Reading expiry from ${rpcUrl}...`);
-  const server = new rpc.Server(rpcUrl);
-  const entries = await readTtls(server, refs, {
+  const entries = await (deps.readEntryTtls ?? readTtls)(server, refs, {
     expiringSoon: Math.round(warnDays * LEDGERS_PER_DAY),
     critical: Math.round(criticalDays * LEDGERS_PER_DAY),
   });
@@ -247,10 +275,6 @@ async function sendCommand(argv: string[], command: 'extend' | 'restore'): Promi
   }
 
   const signer = readKeypair(process.env);
-  const reported = (await loaded.server.getNetwork()).passphrase;
-  if (reported !== loaded.network.passphrase) {
-    throw new Error('The RPC server is on a different network than --network. Nothing was sent.');
-  }
   const source = await loaded.server.getAccount(signer.publicKey());
 
   console.error('Simulating the transactions...');
@@ -291,7 +315,19 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
-  console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
-});
+function isDirectExecution(): boolean {
+  const invokedPath = process.argv[1];
+  if (invokedPath === undefined) return false;
+  try {
+    return resolve(fileURLToPath(import.meta.url)) === resolve(invokedPath);
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectExecution()) {
+  main().catch((error: unknown) => {
+    console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  });
+}
